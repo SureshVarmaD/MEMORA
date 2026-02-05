@@ -40,6 +40,9 @@ type ScanProgress = {
   currentPath: string;
 };
 
+// Dedup mode: "exact" = contentHash, "similar" = perceptualHash, could add more later
+type DedupMode = "exact" | "similar";
+
 function Thumb({ path, name, extension }: { path: string; name: string; extension: string }) {
   const [failed, setFailed] = useState(false);
   // TEMP LOG: show path and src
@@ -111,10 +114,26 @@ function App() {
     }
     return groups;
   };
-  const hashGroups = groupByContentHash(images);
-const sortedImages = React.useMemo(() => {
-  return images.slice().sort((a, b) => b.createdAt - a.createdAt);
-}, [images]);
+  // Group by contentHash for exact, perceptualHash for similar
+  const groupByKey = (list: PhotoFile[], key: "contentHash" | "perceptualHash") => {
+    const groups = new Map<string, PhotoFile[]>();
+    for (const img of list) {
+      const v = (img[key] || "") as string;
+      if (!v) continue;
+      if (!groups.has(v)) groups.set(v, []);
+      groups.get(v)!.push(img);
+    }
+    return groups;
+  };
+
+  // UI: control for dedup mode
+  const [dedupMode, setDedupMode] = useState<DedupMode>("exact");
+  const dedupKey = dedupMode === "exact" ? "contentHash" : "perceptualHash";
+
+  const dedupGroups = React.useMemo(() => groupByKey(images, dedupKey as any), [images, dedupKey]);
+  const sortedImages = React.useMemo(() => {
+    return images.slice().sort((a, b) => b.createdAt - a.createdAt);
+  }, [images]);
 
 useEffect(() => {
   if (!isTauri()) return;
@@ -191,16 +210,57 @@ const ensureTauri = () => {
     }
     // Gather selected paths
     const paths = Array.from(selected);
-    // Confirm destructive action
-    if (!window.confirm(`Delete ${paths.length} selected files?\nFiles may be moved to Trash if supported, or else permanently deleted.`)) {
+
+    // Confirm destructive action FIRST, before doing anything else!
+    if (!window.confirm(`Delete ${paths.length} selected files?\nFiles may be moved to Trash (not permanently deleted).`)) {
       return;
     }
+
     try {
-      await invoke("delete_files", { paths });
-      // Remove deleted images from list and clear selection
-      setImages((prev) => prev.filter((img) => !selected.has(img.path)));
+      // Try to move to trash first
+      const res = await invoke("delete_files", { paths }) as { deleted: string[]; failed: { path: string; error: string }[] };
+      let deleted = res.deleted || [];
+      let failed = res.failed || [];
+      let infoMsg: string[] = [];
+      if (deleted.length) infoMsg.push(`Moved to Trash: ${deleted.length} file(s)`);
+      
+      // Remove ONLY items that backend marked as deleted
+      setImages((prev) => prev.filter((img) => !deleted.includes(img.path)));
       setSelected(new Set());
-      setInfo("Deleted " + paths.length + " file(s)");
+
+      // If some failed to trash, ask for permanent delete
+      if (failed.length) {
+        const failedPaths = failed.map(f => f.path);
+        infoMsg.push(`Some files could not be moved to Trash.`);
+        if (
+          window.confirm(
+            `Some files could not be moved to Trash (${failed.length}):\n${failedPaths
+              .map((p) => `• ${p}`)
+              .join("\n")}\n\nPermanently delete them instead? (Cannot be undone)`
+          )
+        ) {
+          try {
+            const d2 = await invoke("delete_files_permanently", { paths: failedPaths }) as { deleted: string[]; failed: { path: string; error: string }[] };
+            let permDeleted = d2.deleted || [];
+            let permFailed = d2.failed || [];
+            // Remove only those that were deleted permanently
+            setImages((prev) => prev.filter((img) => !permDeleted.includes(img.path)));
+            if (permDeleted.length)
+              infoMsg.push(`Permanently deleted: ${permDeleted.length} file(s)`);
+            if (permFailed.length)
+              infoMsg.push(
+                `Still could not delete:\n${permFailed
+                  .map((f) => `  • ${f.path}: ${f.error}`)
+                  .join("\n")}`
+              );
+          } catch (err: any) {
+            infoMsg.push(typeof err === "string" ? err : "Permanent delete failed.");
+          }
+        } else {
+          infoMsg.push("Permanent delete cancelled. File(s) left untouched.");
+        }
+      }
+      setInfo(infoMsg.join("\n"));
     } catch (err: any) {
       setError(typeof err === "string" ? err : "Delete failed.");
     }
@@ -300,6 +360,30 @@ const ensureTauri = () => {
               <span style={{ marginLeft: 16, fontSize: 14, color: "#68f" }}>
                 {selected.size} selected
               </span>
+              <span style={{ marginLeft: 24 }}>
+                <label>
+                  <input
+                    type="radio"
+                    name="dedup"
+                    value="exact"
+                    checked={dedupMode === "exact"}
+                    onChange={() => setDedupMode("exact")}
+                  />
+                  {' '}
+                  Exact Duplicates
+                </label>
+                <label style={{ marginLeft: 12 }}>
+                  <input
+                    type="radio"
+                    name="dedup"
+                    value="similar"
+                    checked={dedupMode === "similar"}
+                    onChange={() => setDedupMode("similar")}
+                  />
+                  {' '}
+                  Similar (pHash)
+                </label>
+              </span>
             </div>
             <div
               style={{
@@ -317,8 +401,9 @@ const ensureTauri = () => {
                 // TEMP LOG
                 console.log("[MAP IMAGE]", { path: img.path, extension: img.extension, name: img.name });
                 const isSelected = selected.has(img.path);
-                // Detect duplicates
-                const group = img.contentHash && hashGroups.get(img.contentHash);
+                // Duplicate group lookup: by dedupKey
+                const groupVal = (img as any)[dedupKey] || "";
+                const group = groupVal && dedupGroups.get(groupVal);
                 const isDuplicate = group && group.length > 1;
                 return (
                   <div

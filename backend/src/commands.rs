@@ -15,6 +15,7 @@ pub struct ScannedImageFile {
     pub created_at: i64,
     pub modified_at: i64,
     pub content_hash: String,
+    pub perceptual_hash: String, // pHash hex, "" if not decodable
 }
 
 fn is_image_file(path: &Path) -> bool {
@@ -94,6 +95,23 @@ pub async fn scan_folder(folder_path: String, window: Window) -> Result<Vec<Scan
                     let name = entry_path.file_name().unwrap_or_default().to_string_lossy().to_string();
                     let extension = entry_path.extension().unwrap_or_default().to_string_lossy().to_string();
                     let content_hash = compute_content_hash(&entry_path);
+
+                    // Compute perceptual hash for decodable types
+                    let lower_ext = extension.to_lowercase();
+                    let perceptual_hash = if ["jpg", "jpeg", "png", "webp", "gif", "tiff"].contains(&lower_ext.as_str()) {
+                        match img_hash::image::open(&entry_path) {
+                            Ok(img) => {
+                                use img_hash::{HasherConfig, HashAlg};
+                                let hasher = HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher();
+                                let hash = hasher.hash_image(&img);
+                                hash.to_base64()
+                            }
+                            Err(_) => String::new(),
+                        }
+                    } else {
+                        String::new()
+                    };
+
                     images.push(ScannedImageFile {
                         path: entry_path.to_string_lossy().into_owned(),
                         name,
@@ -102,6 +120,7 @@ pub async fn scan_folder(folder_path: String, window: Window) -> Result<Vec<Scan
                         created_at: created,
                         modified_at: modified,
                         content_hash,
+                        perceptual_hash,
                     });
                 }
 
@@ -134,31 +153,53 @@ pub async fn scan_folder(folder_path: String, window: Window) -> Result<Vec<Scan
     Ok(files)
 }
 
-// Delete files: Move to trash if possible, else hard delete (with side effect warning)
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteFilesResult {
+    pub deleted: Vec<String>,
+    pub failed: Vec<DeleteFailed>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteFailed {
+    pub path: String,
+    pub error: String,
+}
+
 #[tauri::command]
-pub async fn delete_files(paths: Vec<String>) -> Result<(), String> {
+pub async fn delete_files(paths: Vec<String>) -> Result<DeleteFilesResult, String> {
     use std::path::Path;
-    let mut errors = vec![];
+    let mut deleted = vec![];
+    let mut failed = vec![];
+
     for p in &paths {
         let as_path = Path::new(p);
-        // Try trash first
         match trash::delete(as_path) {
-            Ok(_) => {}
-            Err(_) => {
-                // Trash failed, fallback to permanent delete
-                match fs::remove_file(as_path) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        errors.push(format!("{}: {}", p, e));
-                    }
-                }
+            Ok(_) => {
+                deleted.push(p.clone());
+            }
+            Err(e) => {
+                failed.push(DeleteFailed { path: p.clone(), error: e.to_string() });
             }
         }
     }
+    Ok(DeleteFilesResult { deleted, failed })
+}
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("Some files failed to delete:\n{}", errors.join("\n")))
+// Permanently delete files, only on explicit confirmation
+#[tauri::command]
+pub async fn delete_files_permanently(paths: Vec<String>) -> Result<DeleteFilesResult, String> {
+    use std::path::Path;
+    let mut deleted = vec![];
+    let mut failed = vec![];
+
+    for p in &paths {
+        let as_path = Path::new(p);
+        match std::fs::remove_file(as_path) {
+            Ok(_) => deleted.push(p.clone()),
+            Err(e) => failed.push(DeleteFailed { path: p.clone(), error: e.to_string() }),
+        }
     }
+    Ok(DeleteFilesResult { deleted, failed })
 }
