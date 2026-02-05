@@ -5,4 +5,5 @@ export type PhotoFile = {
   sizeBytes: number;
   createdAt: number;   // or string depending on your backend (you currently use i64 millis)
   modifiedAt: number;
+  contentHash: string;
 };
