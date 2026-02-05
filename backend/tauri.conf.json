@@ -23,8 +23,14 @@
         "fullscreen": false
       }
     ],
-    "security": {
-      "csp": null
+  "security": {
+    "csp": null,
+    "assetProtocol": {
+      "enable": true,
+      "scope": [
+       "/Users/D069583/**"
+        ]
+      }
     }
   },
   "bundle": {

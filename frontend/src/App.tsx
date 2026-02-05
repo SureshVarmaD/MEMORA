@@ -42,7 +42,13 @@ type ScanProgress = {
 
 function Thumb({ path, name, extension }: { path: string; name: string; extension: string }) {
   const [failed, setFailed] = useState(false);
+  // TEMP LOG: show path and src
   const src = convertFileSrc(path);
+
+  useEffect(() => {
+    // Only log when changing images
+    console.log("[THUMB]", { path, src, extension });
+  }, [path, src, extension]);
 
   if (failed) {
     return (
@@ -60,7 +66,7 @@ function Thumb({ path, name, extension }: { path: string; name: string; extensio
           background: "#0f0f0f",
         }}
       >
-        Preview not available
+        Preview unavailable
         <br />
         <b>{extension?.toUpperCase()}</b>
       </div>
@@ -73,10 +79,14 @@ function Thumb({ path, name, extension }: { path: string; name: string; extensio
       alt={name}
       loading="lazy"
       style={{ width: "100%", height: "100%", objectFit: "cover" }}
+      onLoad={() => {
+        // TEMP LOG: img loaded
+        console.log("[IMG LOADED]", { name, path, src, extension });
+      }}
       onError={() => {
         setFailed(true);
         // For diagnosis
-        console.warn("Thumbnail preview failed:", src, path, extension);
+        console.warn("Thumbnail preview failed:", { src, path, extension });
       }}
     />
   );
@@ -102,6 +112,9 @@ function App() {
     return groups;
   };
   const hashGroups = groupByContentHash(images);
+const sortedImages = React.useMemo(() => {
+  return images.slice().sort((a, b) => b.createdAt - a.createdAt);
+}, [images]);
 
 useEffect(() => {
   if (!isTauri()) return;
@@ -156,11 +169,9 @@ const ensureTauri = () => {
     setProgress(null);
 
     try {
-      let photos: PhotoFile[] = await invoke("scan_folder", {
+      const photos: PhotoFile[] = await invoke("scan_folder", {
         folderPath: path,
       });
-      // Sort by createdAt descending
-      photos = photos.slice().sort((a, b) => b.createdAt - a.createdAt);
       setImages(photos);
       setSelected(new Set());
     } catch (err: any) {
@@ -298,11 +309,14 @@ const ensureTauri = () => {
                 background: "#181818",
                 padding: "14px",
                 borderRadius: "10px",
+                maxHeight: "65vh",
+                overflowY: "auto",
               }}
             >
-              {images.map((img) => {
+              {sortedImages.map((img) => {
+                // TEMP LOG
+                console.log("[MAP IMAGE]", { path: img.path, extension: img.extension, name: img.name });
                 const isSelected = selected.has(img.path);
-                const thumbSrc = convertFileSrc(img.path);
                 // Detect duplicates
                 const group = img.contentHash && hashGroups.get(img.contentHash);
                 const isDuplicate = group && group.length > 1;
