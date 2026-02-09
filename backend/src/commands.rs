@@ -16,6 +16,7 @@ pub struct ScannedImageFile {
     pub modified_at: i64,
     pub content_hash: String,
     pub perceptual_hash: String, // pHash hex, "" if not decodable
+    pub scene_hash: String, // block mean luminance/scene signature as hex, "" if not decodable
 }
 
 fn is_image_file(path: &Path) -> bool {
@@ -98,18 +99,38 @@ pub async fn scan_folder(folder_path: String, window: Window) -> Result<Vec<Scan
 
                     // Compute perceptual hash for decodable types
                     let lower_ext = extension.to_lowercase();
-                    let perceptual_hash = if ["jpg", "jpeg", "png", "webp", "gif", "tiff"].contains(&lower_ext.as_str()) {
-                        match img_hash::image::open(&entry_path) {
+                    let (perceptual_hash, scene_hash) = if ["jpg", "jpeg", "png", "webp", "gif", "tiff"].contains(&lower_ext.as_str()) {
+                        let phash = match img_hash::image::open(&entry_path) {
                             Ok(img) => {
                                 use img_hash::{HasherConfig, HashAlg};
                                 let hasher = HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher();
                                 let hash = hasher.hash_image(&img);
-                                hash.to_base64()
+                                hex::encode(hash.as_bytes())
                             }
                             Err(_) => String::new(),
-                        }
+                        };
+
+                        // Scene hash: block mean luminance, quantized, hex encoding
+                        let shash = match image::open(&entry_path) {
+                            Ok(img) => {
+                                let resized = img.resize_exact(16, 16, image::imageops::FilterType::Nearest).to_luma8();
+                                // could also use 24x24 for more granularity
+                                let mut v = vec![];
+                                for y in 0..resized.height() {
+                                    for x in 0..resized.width() {
+                                        let pix = resized.get_pixel(x, y)[0] as u16;
+                                        // quantize to 0..15, robust to noise
+                                        let bucket = pix / 16;
+                                        v.push(bucket as u8);
+                                    }
+                                }
+                                hex::encode(&v)
+                            }
+                            Err(_) => String::new(),
+                        };
+                        (phash, shash)
                     } else {
-                        String::new()
+                        (String::new(), String::new())
                     };
 
                     images.push(ScannedImageFile {
@@ -121,6 +142,7 @@ pub async fn scan_folder(folder_path: String, window: Window) -> Result<Vec<Scan
                         modified_at: modified,
                         content_hash,
                         perceptual_hash,
+                        scene_hash,
                     });
                 }
 
